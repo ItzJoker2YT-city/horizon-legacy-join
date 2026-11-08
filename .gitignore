@@ -5,3 +5,4 @@ horizon/
 mixins/
 *.hnmod
 tool-output/
+__pycache__/
