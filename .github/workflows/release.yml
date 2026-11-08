@@ -17,9 +17,9 @@ env:
   MIXINS_REV: "main"
   RUST: "1.95.0"
   # The staged workspace: a complete copy of Horizon with the mod applied. It
-  # must sit outside the checkout (the mod dir is the checkout itself, and the
-  # tool refuses an output inside the workspace, mods or an existing stage).
-  STAGE: "${{ github.workspace }}/../staged"
+  # must sit outside the checkout (the mod dir is the checkout itself), with no
+  # `..` in the path — the runner's per-job temp dir satisfies both.
+  STAGE: "${{ runner.temp }}/stage"
 
 jobs:
   build:
