@@ -1,0 +1,12 @@
+[package]
+name = "horizon_legacy_join_data"
+version = "0.1.0"
+edition = "2021"
+description = "Packet id tables for the horizon-legacy-join mod's legacy lanes (generated; committed)"
+
+# No dependencies at all: the tables are plain const arrays, so the bundle
+# builds offline-locked against Horizon's Cargo.lock without adding anything.
+[dependencies]
+
+[lib]
+path = "src/lib.rs"

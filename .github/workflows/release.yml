@@ -1,0 +1,86 @@
+name: build-and-release
+# Every build publishes an alpha/beta release of the bundle (alpha.N rises per
+# run; the release notes say which lanes are wired and what changed).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # The Horizon Nightly commit the bundle is pinned to (horizon-mixin.toml agrees).
+  HORIZON_REV: "5f7cadfff0fc073c0e4a68558754578c0d680a29"
+  # The horizon-mixins commit the bundle applies with.
+  MIXINS_REV: "main"
+  RUST: "1.95.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: The Horizon source at the pinned commit
+        run: |
+          git init horizon
+          git -C horizon remote add origin https://github.com/horizon-rust/horizon.git
+          git -C horizon fetch --depth 1 origin "$HORIZON_REV"
+          git -C horizon checkout "$HORIZON_REV"
+
+      - name: The horizon-mixins tool
+        run: |
+          git clone https://github.com/horizon-rust/horizon-mixins.git mixins
+          git -C mixins checkout "$MIXINS_REV"
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "${{ env.RUST }}"
+          components: rustfmt
+
+      - name: Tool dependencies
+        run: cargo fetch --locked --manifest-path mixins/Cargo.toml
+
+      - name: Generate the lane tables
+        # A failure keeps the committed tables; the build stays whole.
+        run: python3 tools/generate_data.py --horizon-src horizon || true
+
+      - name: Plan and apply the mixins (staged workspace in target/staged)
+        run: |
+          cargo install --path mixins/crates/horizon-mixins-cli --locked
+          horizon-mixins plan --workspace horizon --mods . --out target/staged
+          horizon-mixins apply --workspace horizon --mods . --out target/staged
+
+      - name: Cargo check the engine's crates (offline, locked)
+        working-directory: target/staged
+        run: |
+          cargo check --locked --offline -p horizon-protocol
+          cargo check --locked --offline -p horizon-client
+
+      - name: Package the .hnmod
+        run: |
+          zip -r "horizon-legacy-join-${{ github.run_number }}.hnmod" \
+            horizon-mixin.toml helpers engine legacy_data README.md
+
+      - name: Publish the release (alpha, rising per run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'EOF'
+          Horizon Legacy Join **alpha build** — alpha.${{ github.run_number }}.
+
+          - Pinned to Horizon Nightly at ${{ env.HORIZON_REV }} (Nov 2026 main).
+          - What works: joining **1.20.1 (763)** servers lands through the bridge;
+            1.20.2+ keep working through upstream's own adapter, now permanently on.
+          - Lanes older than 1.20.1 are listed but not generated yet: their tables
+            land in later alphas (see the README's roadmap).
+          - Alpha quality: ints may shed on exotic packets (the game tolerates
+            unknowns); reports welcome with the log's lane notices.
+          EOF
+          gh release create "alpha.${{ github.run_number }}" \
+            --title "alpha.${{ github.run_number }}: lane 763 wired" \
+            --notes-file notes.md \
+            "horizon-legacy-join-${{ github.run_number }}.hnmod"

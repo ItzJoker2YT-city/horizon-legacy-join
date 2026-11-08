@@ -1,0 +1,7 @@
+# Repo scaffolding for the native mod bundle: staged output and CI targets.
+/target/
+/target/staged/
+horizon/
+mixins/
+*.hnmod
+tool-output/
