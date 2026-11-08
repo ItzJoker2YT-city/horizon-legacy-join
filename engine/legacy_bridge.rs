@@ -111,6 +111,9 @@ pub struct Bridge {
     inner: Session,
     /// Translations waiting for Horizon to read, in pinned numbering.
     incoming: VecDeque<(i32, Vec<u8>)>,
+    /// Bodies Horizon sends next (follow-ups the inner session's translation
+    /// produced), renumbered into the lane's own ids.
+    outgoing: Vec<Vec<u8>>,
 }
 
 impl Bridge {
@@ -119,12 +122,26 @@ impl Bridge {
             lane: lane(protocol).unwrap_or(&LANES[0]),
             inner: Session::new(ServerVersion::V1_20_3),
             incoming: VecDeque::new(),
+            outgoing: Vec::new(),
         }
     }
 
     /// The next translation Horizon reads.
     pub fn take_incoming(&mut self) -> Option<(i32, Vec<u8>)> {
         self.incoming.pop_front()
+    }
+
+    /// Bodies Horizon sends right behind the packet it just sent.
+    pub fn take_outgoing(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.outgoing)
+    }
+
+    /// The inner session's own follow-ups (it queues split or extra packets
+    /// there), renumbered into the lane's numbers for this state's wire.
+    fn pull_inner_outgoing(&mut self, state: State) {
+        for body in self.inner.take_outgoing() {
+            self.outgoing.push(self.swap_outgoing_id(state, body));
+        }
     }
 
     /// A packet Horizon sends, as its full pinned-numbered body. The lane
@@ -160,6 +177,7 @@ impl Bridge {
                 .serverbound(body)?
                 .map(|body| self.swap_outgoing_id(entry, body)),
         };
+        self.pull_inner_outgoing(entry);
         Ok(forwarded)
     }
 
@@ -179,6 +197,7 @@ impl Bridge {
         match reading {
             State::Login => {
                 let translated = self.inner.clientbound(inner_id, payload)?;
+                self.pull_inner_outgoing(reading);
                 // The login went through: queue the phase the era lacks, and
                 // steer the inner session into its play state behind it.
                 if self.inner.reading() == State::Configuration {
@@ -189,7 +208,11 @@ impl Bridge {
             // The connection hears nothing on the wire during this phase: its
             // client side was fabricated. Strays (a second finish somehow) drop.
             State::Configuration => Ok(None),
-            _ => self.inner.clientbound(inner_id, payload),
+            _ => {
+                let translated = self.inner.clientbound(inner_id, payload)?;
+                self.pull_inner_outgoing(reading);
+                Ok(translated)
+            }
         }
     }
 
