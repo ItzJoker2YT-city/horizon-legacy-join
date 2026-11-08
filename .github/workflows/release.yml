@@ -16,6 +16,10 @@ env:
   # The horizon-mixins commit the bundle applies with.
   MIXINS_REV: "main"
   RUST: "1.95.0"
+  # The staged workspace: a complete copy of Horizon with the mod applied. It
+  # must sit outside the checkout (the mod dir is the checkout itself, and the
+  # tool refuses an output inside the workspace, mods or an existing stage).
+  STAGE: "${{ github.workspace }}/../staged"
 
 jobs:
   build:
@@ -44,21 +48,21 @@ jobs:
       - name: Tool dependencies
         run: cargo fetch --locked --manifest-path mixins/Cargo.toml
 
+      - name: Workspace dependencies (the planner resolves the lock offline)
+        run: cargo fetch --locked --manifest-path horizon/Cargo.toml
+
       - name: Generate the lane tables
         # A failure keeps the committed tables; the build stays whole.
         run: python3 tools/generate_data.py --horizon-src horizon || true
 
-      - name: Plan and apply the mixins (staged workspace in target/staged)
+      - name: Plan and apply the mixins (staged workspace)
         run: |
           cargo install --path mixins/crates/horizon-mixins-cli --locked
-          horizon-mixins plan --workspace horizon --mods . --out target/staged
-          horizon-mixins apply --workspace horizon --mods . --out target/staged
+          horizon-mixins plan --workspace horizon --mods . --out "$STAGE"
+          horizon-mixins apply --workspace horizon --mods . --out "$STAGE"
 
       - name: Cargo check the engine's crates (offline, locked)
-        working-directory: target/staged
-        run: |
-          cargo check --locked --offline -p horizon-protocol
-          cargo check --locked --offline -p horizon-client
+        run: cd "$STAGE" && cargo check --locked --offline -p horizon-protocol && cargo check --locked --offline -p horizon-client
 
       - name: Package the .hnmod
         run: |
