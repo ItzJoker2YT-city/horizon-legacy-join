@@ -8,3 +8,4 @@ mod/README.md
 *.hnmod
 tool-output/
 __pycache__/
+mod/legacy_data/target/
