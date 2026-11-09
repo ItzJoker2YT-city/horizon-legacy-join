@@ -128,7 +128,7 @@ def rust_table(name: str, values: list[int | None]) -> str:
     cells = [f"Some({v})" if v is not None else "None" for v in values]
     return (
         "#[rustfmt::skip]\n"
-        "#[allow(dead_code)]  # both directions are generated; a lane drives either up or down\n"
+        "#[allow(dead_code)] // both directions are generated; a lane drives either up or down\n"
         "static " + name + ": [Option<u8>; 256] = [\n    "
         + ", ".join(cells) + ",\n];"
     )
