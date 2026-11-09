@@ -46,10 +46,24 @@ the answer there, and the engine refuses to let a lane shadow any protocol
 
 ## Installing
 
-1. Download the newest `alpha.N` release from GitHub Releases.
-2. Unzip it into the Horizon launcher's mods folder (the launcher builds the game
-   with it on the next `native-build`). The bundle is pinned to one Horizon commit
-   (the Nightly it was made against); the launcher Mismatch may offer "Build anyway".
+1. Download the newest release's `horizon-legacy-join-N.hnmod` from GitHub
+   Releases.
+2. Drop the file into the launcher's native-mods folder — that is the whole
+   install, do not unzip it: on Windows
+   `%APPDATA%\horizon\horizon-native-mods\`. The launcher reads the
+   `horizon-native.json` inside (the mod id `horizon_legacy_join`, its
+   version, the pinned revisions) and compiles the bundle under `mixins/` into
+   the game.
+3. Launch the game. The first build after adding (or bumping) the mod takes a
+   while — expect roughly 20–30 minutes of compiling; later launches reuse the
+   build cache.
+
+Use an alpha from this packaging on (the first that loads): **alpha.17 and
+older were never loadable** — their bundles lacked the native manifest the
+loader reads first, so the launcher reported `missing horizon-native.json`
+instead of building them. The bundle is pinned to one Horizon commit (the
+Nightly it was made against); the launcher's Mismatch dialog may offer
+"Build anyway".
 
 The mod carries the `HORIZON_OLDER_SERVERS` gate with it: the built-in support
 stays active, and the mod's own lanes activate alongside it.
@@ -96,8 +110,12 @@ hole for resolutions).
 mod/horizon-mixin.toml     the bundle manifest (injections, support module, state)
 mod/helpers/               one .rs file per hook point (compiled into the game)
 mod/engine/legacy_bridge.rs the injected support module (the whole lane engine)
-mod/tools/generate_data.py composes the lane tables from PrismarineJS/minecraft-data's
-                           per-version protocol documents (name-matched lane -> 765-era ids)
+mod/tools/                 build tooling only (repo-side, not shipped in the
+                           .hnmod): generate_data.py composes the lane tables
+                           from PrismarineJS/minecraft-data's per-version
+                           protocol documents (name-matched lane -> 765-era
+                           ids); package_hnmod.py packages the bundle in the
+                           launcher's native format
 mod/legacy_data/           the generated tables, a workspace crate of the engine's own
 .github/workflows/         CI: apply the mixins, cargo-check, package, release
 ```
@@ -110,9 +128,10 @@ sitting in the root itself).
 
 CI (`.github/workflows/release.yml`) does everything: it clones Horizon at the
 pinned commit, regenerates lane data when needed, runs `horizon-mixins plan/apply`,
-`cargo check`s the affected crates offline-locked, zips the bundle as
-`horizon-legacy-join-<version>.hnmod`, and publishes a release. Locally you need
-rustup 1.95+ and Python 3.11.
+`cargo check`s the affected crates offline-locked, packages the bundle in the
+launcher's native format with `mod/tools/package_hnmod.py` (root
+`horizon-native.json` + sources under `mixins/<mod id>/`), and publishes a
+release. Locally you need rustup 1.95+ and Python 3.11.
 
 ## License
 

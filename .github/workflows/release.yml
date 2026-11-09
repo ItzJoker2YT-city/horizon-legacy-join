@@ -81,11 +81,16 @@ jobs:
         run: cd "$RUNNER_TEMP/stage" && cargo check --locked --offline -p horizon-protocol && cargo check --locked --offline -p horizon-client
 
       - name: Package the .hnmod
+        # The launcher's native format: the zip carries the mod's
+        # horizon-native.json at its root and the whole bundle under
+        # mixins/<mod id>/; the packer enforces identity and the file rules.
         run: |
           cp README.md mod/README.md
-          cd mod
-          zip -r "../horizon-legacy-join-${{ github.run_number }}.hnmod" \
-            horizon-mixin.toml helpers engine legacy_data README.md
+          python3 mod/tools/package_hnmod.py \
+            --game 26.3 \
+            --horizon "$HORIZON_REV" \
+            --mixins "$(git -C mixins rev-parse HEAD)" \
+            --out "horizon-legacy-join-${{ github.run_number }}.hnmod"
 
       - name: Publish the release (alpha, rising per run)
         env:
@@ -95,6 +100,11 @@ jobs:
           Horizon Legacy Join **alpha build** — alpha.${{ github.run_number }}.
 
           - Pinned to Horizon Nightly at ${{ env.HORIZON_REV }} (Nov 2026 main).
+          - **Now packaged as a native mod**: the .hnmod carries the root
+            horizon-native.json the loader reads first, with the bundle under
+            mixins/horizon_legacy_join/. Alpha.17 and earlier never loaded
+            (the launcher reported "missing horizon-native.json") — replace
+            any installed copy with this one.
           - Every legacy lane is in: **all 35 joinable releases from 1.8.x (47)
             through 1.20.1 (763)** carry per-release packet id tables,
             name-matched against 1.20.3 (the bridge's own era) and composed

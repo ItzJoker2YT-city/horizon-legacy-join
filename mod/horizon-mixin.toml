@@ -1,9 +1,10 @@
 # Horizon Legacy Join — join servers of 1.8.x..1.20.1 from Horizon.
 # Native mod bundle: hooks into the game's own network stack before the handshake,
 # and drives a per-connection legacy bridge inside horizon-protocol's adapter.
+# A mod id is [a-z0-9_] (the native manifest's rule), hence underscores.
 [mod]
-id = "horizon-legacy-join"
-version = "0.2.1"
+id = "horizon_legacy_join"
+version = "0.2.2"
 priority = 10
 
 # The Nightly commit (tag `nightly[14706039]: "Next Steps: extend ID helpers (#8718)"` base) this
