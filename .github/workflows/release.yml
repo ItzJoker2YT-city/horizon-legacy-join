@@ -66,7 +66,10 @@ jobs:
         # temp dir satisfies both.
         run: |
           cargo install --path mixins/crates/horizon-mixins-cli --locked
-          horizon-mixins plan --workspace horizon --mods . --out "$RUNNER_TEMP/stage"
+          # plan and apply take separate --out directories: a directory left by
+          # standalone plan carries plan ownership, and apply refuses to replace
+          # it (E_STAGE_OWNERSHIP). The apply stage is the build's workspace.
+          horizon-mixins plan --workspace horizon --mods . --out "$RUNNER_TEMP/plan"
           horizon-mixins apply --workspace horizon --mods . --out "$RUNNER_TEMP/stage"
 
       - name: Cargo check the engine's crates (offline, locked)
