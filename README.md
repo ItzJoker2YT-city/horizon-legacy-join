@@ -14,7 +14,7 @@ this mod extends the same adapter machinery down through the legacy protocols.
 
 | Milestone | Content |
 |---|---|
-| **alpha-1 (this repo)** | Engine + hooks fully wired: legacy detection (the server list shows old servers as joinable), a per-connection bridge (an upstream `Session` pinned to 1.20.3 driven by a lane-wire adapter), the handshake rewritten to the server's own protocol, the login flow, and the configuration phase fabricated for servers that predate 1.20.2 (era registries, tags, known packs, the finish). Lane **763 (1.20.1)** has generated packet id tables (lane → inner 765-era ids, name-matched from PrismarineJS/minecraft-data; 108 play entries plus status and login). Older lanes are listed in the registry and gated on their tables, which arrive release by release. |
+| **alpha-1 (this repo)** | Engine + hooks fully wired: lane detection on the join path, a per-connection bridge (an upstream `Session` pinned to 1.20.3, stamped as its lane's driver through an injected state), the handshake rewritten to the server's own protocol, the login flow, and the configuration phase fabricated for servers that predate 1.20.2 (era registries, tags, known packs, the finish). Lane **763 (1.20.1)** has generated packet id tables (name-matched from PrismarineJS/minecraft-data). Older lanes are listed in the registry and gated on their tables, which arrive release by release. The server list shows 1.8.x–1.20.1 entries as *incompatible* (display only — see How it works); selecting and joining them works. |
 | later alphas | Tables for the lanes toward 1.8 (per-release protocol.json runs), payload-layout translations per era (chat signing, the 1.13 flattening, pre-flattening item formats), and full coverage 47..763. |
 
 The design mirrors upstream's engine (`crates/horizon-protocol/src/adapter`): one
@@ -29,24 +29,44 @@ registry splitting, text handling) and adds the lanes upstream never generated.
    with it on the next `native-build`). The bundle is pinned to one Horizon commit
    (the Nightly it was made against); the launcher Mismatch may offer "Build anyway".
 
-The mod replaces the `HORIZON_OLDER_SERVERS` gate: the built-in support stays
-active, and the mod's own lanes activate alongside it.
+The mod carries the `HORIZON_OLDER_SERVERS` gate with it: the built-in support
+stays active, and the mod's own lanes activate alongside it.
 
 ## How it works (one page)
 
-- `horizon_client::net::older_servers_enabled` is overwritten to `true`.
-- `horizon_client::net::older_server` is overwritten: it pings for the protocol
-  number; unknown-to-upstream protocols that the mod's lane registry covers are
-  resolved on this connection and recorded for the next step.
-- `ServerVersion::from_protocol` is overwritten so the server list marks those
-  servers *joinable* (the displayed version name still comes from the ping json).
-- `Connection::adapt` is overwritten: a legacy connection gets the mod's bridge
-  (`crate::adapter::legacy_join::Bridge`, a support module injected into
-  `adapter.rs`) attached to both halves; upstream versions keep upstream's `Session`.
-- `ConnReader::recv` / `ConnWriter::send` are overwritten (their original bodies
-  kept as the non-legacy path): the bridge renumbers and rewrites packets both
-  ways, queues multi-packet translations, and fabricates the configuration phase
-  for servers that go login → play directly.
+Every hook is a *cancellable* head injection (`horizon-mixins` kind `HEAD`):
+the helper either does the legacy work itself and breaks out of the target
+with its answer, or returns *continue* and the untouched original body runs —
+upstream's own adapter behavior stays on for 1.20.2..26.2 servers and plain
+connections.
+
+- `horizon_client::net::older_server`: a pinged protocol that upstream cannot
+  name but this mod's lane registry covers is resolved and recorded on the
+  joining thread (the hook also answers upstream's `HORIZON_OLDER_SERVERS`
+  gate, so the built-in support stays active).
+- `Connection::adapt`: when a covered lane was just recorded, a *stamped
+  legacy session* — an upstream [`Session`](https://github.com/horizon-rust/horizon/blob/main/crates/horizon-protocol/src/adapter/session.rs)
+  pinned to 1.20.3 (765), stamped with the lane's protocol number through an
+  injected `[[state]]` whose constructor sits on `Session::new` — is attached
+  to the connection's own adapter fields (both halves). Upstream versions
+  run upstream's body unchanged.
+- `ConnReader::recv` / `ConnWriter::send`: on a stamped session, the bridge in
+  `adapter::legacy_join` renumbers and rewrites packets both ways, queues
+  multi-packet translations, fabricates the configuration phase (era
+  registries, tags, known packs, the finish) for servers that go login → play
+  directly, and keeps the wire quiet where the era never speaks (the login
+  acknowledgment). Without a stamp, the original body runs.
+- The engine (the `legacy_join` module) is injected into `adapter.rs`, so it
+  reads upstream's own private tables and legacy registries; its packet id
+  maps live in the engine's workspace crate (`mod/legacy_data`, generated by
+  `mod/tools/generate_data.py`).
+
+Alpha-1 display limitation: `ServerVersion::from_protocol` cannot be hooked —
+the planner's cancellation contract rejects an `Option<Self>` result — so the
+server list labels 1.8.x–1.20.1 entries *incompatible*. The list entry's Join
+button joins the address anyway, and the bridge takes it from there (the
+display can switch to the "joinable" behavior once upstream's contract has a
+hole for resolutions).
 
 ## Layout
 

@@ -99,6 +99,9 @@ jobs:
             1.20.2+ keep working through upstream's own adapter, now permanently on.
           - Lanes older than 1.20.1 are listed but not generated yet: their tables
             land in later alphas (see the README's roadmap).
+          - Display note: the server list marks 1.20.1 servers "incompatible"
+            (a resolver hook the planner cannot express yet is pending); the
+            Join button on the entry still joins them.
           - Alpha quality: ints may shed on exotic packets (the game tolerates
             unknowns); reports welcome with the log's lane notices.
           EOF
