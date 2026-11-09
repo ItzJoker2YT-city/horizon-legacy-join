@@ -49,6 +49,11 @@ jobs:
           toolchain: "${{ env.RUST }}"
           components: rustfmt
 
+      - name: Linux system dependencies (the pinned workspace's headers)
+        # Horizon's Linux build needs the ALSA and udev headers
+        # (CONTRIBUTING.md: "libasound2-dev libudev-dev"); the runner lacks them.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev
+
       - name: Tool dependencies
         run: cargo fetch --locked --manifest-path mixins/Cargo.toml
 
