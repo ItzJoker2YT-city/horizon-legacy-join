@@ -44,11 +44,7 @@ kind = "OVERWRITE"
 helper = "helpers/adapt.rs"
 bindings = [
   { name = "conn", ty = "&mut Connection", value = "&mut *self" },
-  {
-    name = "version",
-    ty = "crate::adapter::ServerVersion",
-    value = "version",
-  },
+  { name = "version", ty = "crate::adapter::ServerVersion", value = "version" },
 ]
 
 # 5. The reader: drain the bridge's queue first, translate what arrives.
