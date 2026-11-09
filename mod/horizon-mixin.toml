@@ -3,7 +3,7 @@
 # and drives a per-connection legacy bridge inside horizon-protocol's adapter.
 [mod]
 id = "horizon-legacy-join"
-version = "0.1.0"
+version = "0.2.0"
 priority = 10
 
 # The Nightly commit (tag `nightly[14706039]: "Next Steps: extend ID helpers (#8718)"` base) this

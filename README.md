@@ -14,8 +14,8 @@ this mod extends the same adapter machinery down through the legacy protocols.
 
 | Milestone | Content |
 |---|---|
-| **alpha-1 (this repo)** | Engine + hooks fully wired: lane detection on the join path, a per-connection bridge (an upstream `Session` pinned to 1.20.3, stamped as its lane's driver through an injected state), the handshake rewritten to the server's own protocol, the login flow, and the configuration phase fabricated for servers that predate 1.20.2 (era registries, tags, known packs, the finish). Lane **763 (1.20.1)** has generated packet id tables (name-matched from PrismarineJS/minecraft-data). Older lanes are listed in the registry and gated on their tables, which arrive release by release. The server list shows 1.8.x–1.20.1 entries as *incompatible* (display only — see How it works); selecting and joining them works. |
-| later alphas | Tables for the lanes toward 1.8 (per-release protocol.json runs), payload-layout translations per era (chat signing, the 1.13 flattening, pre-flattening item formats), and full coverage 47..763. |
+| **alpha (this repo)** | Engine + hooks fully wired: lane detection on the join path, a per-connection bridge (an upstream `Session` pinned to 1.20.3, stamped as its lane's driver through an injected state), the handshake rewritten to the server's own protocol, the login flow, and the configuration phase fabricated for servers that predate 1.20.2 (era registries, tags, known packs, the finish). **Every advertised release 1.8.x..1.20.1 has a lane** — 35 of the 36 legacy release protocols, id tables name-matched from PrismarineJS/minecraft-data per release. The lone gap: **1.14.2 (485)**, which no minecraft-data document covers — those servers are refused until the data grows. Id-level alpha: era payload layouts are not translated yet, so pre-flattening joins (roughly 1.8..1.14, where packet bodies diverge hard) degrade or die rather than play fully; newer lanes translate furthest. The server list shows 1.8.x–1.20.1 entries as *incompatible* (display only — see How it works); selecting and joining them works. |
+| later alphas | Payload-layout translations per era (chat signing, the 1.13 flattening, pre-flattening item formats, login-era bodies), a data path for 1.14.2, and runtime coverage checks against real era servers. |
 
 The design mirrors upstream's engine (`crates/horizon-protocol/src/adapter`): one
 session per connection, per-version tables, translations release by release. It
@@ -27,7 +27,7 @@ registry splitting, text handling) and adds the lanes upstream never generated.
 | Range | Owner | How |
 |---|---|---|
 | 1.20.2 (764) .. 26.3 (777) — every release between: 1.20.3/4, 1.20.5/6, 1.21/1.21.1, 1.21.2/3, 1.21.4, 1.21.5, 1.21.6, 1.21.7/8, 1.21.9/10, **1.21.11 (774)**, 26.1/26.1.1/26.1.2, 26.2 | Horizon upstream | its own adapter; `ServerVersion::from_protocol` resolves each release |
-| 1.8.x (47) .. 1.20.1 (763) | this mod | the lane registry + tables, release by release |
+| 1.8.x (47) .. 1.20.1 (763) — every release between: 1.9.x, 1.10.x, 1.11.x, 1.12.x, 1.13.x, 1.14.x, 1.15.x, 1.16.x, 1.17.x, 1.18.x, 1.19.x, 1.20/1.20.1 | this mod | per-release id tables generated from minecraft-data; the engine's gate admits exactly the generated lane set |
 
 The split is enforced inside the engine: a protocol upstream already resolves
 never becomes a lane of this mod, so as broader tables arrive they can only
@@ -52,7 +52,7 @@ upstream's own adapter behavior stays on for 1.20.2..26.2 servers and plain
 connections.
 
 - `horizon_client::net::older_server`: a pinged protocol that upstream cannot
-  name but this mod's lane registry covers is resolved and recorded on the
+  name but this mod's generated lane set covers is resolved and recorded on the
   joining thread (the hook also answers upstream's `HORIZON_OLDER_SERVERS`
   gate, so the built-in support stays active).
 - `Connection::adapt`: when a covered lane was just recorded, a *stamped

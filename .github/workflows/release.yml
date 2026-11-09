@@ -95,17 +95,25 @@ jobs:
           Horizon Legacy Join **alpha build** — alpha.${{ github.run_number }}.
 
           - Pinned to Horizon Nightly at ${{ env.HORIZON_REV }} (Nov 2026 main).
-          - What works: joining **1.20.1 (763)** servers lands through the bridge;
-            1.20.2+ keep working through upstream's own adapter, now permanently on.
-          - Lanes older than 1.20.1 are listed but not generated yet: their tables
-            land in later alphas (see the README's roadmap).
-          - Display note: the server list marks 1.20.1 servers "incompatible"
-            (a resolver hook the planner cannot express yet is pending); the
-            Join button on the entry still joins them.
+          - Every legacy lane is in: **all 35 joinable releases from 1.8.x (47)
+            through 1.20.1 (763)** carry per-release packet id tables,
+            name-matched against 1.20.3 (the bridge's own era) and composed
+            per build from PrismarineJS/minecraft-data. 1.20.2+ keep working
+            through upstream's own adapter, now permanently on.
+          - The lone refusal: **1.14.2 (485)** — no minecraft-data document
+            resolves to it yet.
+          - Id-level alpha: packets are translated by identity (packet ids),
+            not by era payload layouts. Joins into pre-flattening eras
+            (roughly 1.8..1.14) degrade mid-play or die at login when a packet
+            body diverges; newer lanes translate furthest. Translating the era
+            layouts themselves is the next milestone.
+          - Display note: the server list marks 1.8.x–1.20.1 entries
+            "incompatible" (a resolver hook the planner cannot express yet is
+            pending); the Join button on the entry still joins them.
           - Alpha quality: ints may shed on exotic packets (the game tolerates
             unknowns); reports welcome with the log's lane notices.
           EOF
           gh release create "alpha.${{ github.run_number }}" \
-            --title "alpha.${{ github.run_number }}: lane 763 wired" \
+            --title "alpha.${{ github.run_number }}: all 1.8..1.20.1 lanes wired" \
             --notes-file notes.md \
             "horizon-legacy-join-${{ github.run_number }}.hnmod"

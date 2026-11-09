@@ -24,7 +24,7 @@ fn older_server(address: &str) -> ::core::ops::ControlFlow<Option<horizon_protoc
         return ::core::ops::ControlFlow::Break(None);
     }
     // A covered legacy lane: remember it for adapt, join through the bridge.
-    if horizon_protocol::adapter::legacy_join::lane(protocol).is_some() {
+    if horizon_protocol::adapter::legacy_join::covered(protocol) {
         horizon_protocol::adapter::legacy_join::set_thread_protocol(protocol);
         // The value only feeds `is_some()` and one log line; adapt reads the
         // thread-local instead of this argument.

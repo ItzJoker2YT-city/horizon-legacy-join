@@ -9,3 +9,6 @@ mod/README.md
 tool-output/
 __pycache__/
 mod/legacy_data/target/
+# standalone cargo runs on the generated crate create these; the engine's
+# staged workspace owns the real lock
+mod/legacy_data/Cargo.lock

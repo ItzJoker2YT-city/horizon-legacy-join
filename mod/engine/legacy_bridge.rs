@@ -8,10 +8,11 @@
 // session, a lane protocol otherwise). The queues the session already owns
 // (incoming, outgoing) carry everything fabricated on top.
 //
-// Alpha-1 wires lane 763 (1.20.1): its login and status packets match the
-// 765 era, and its play packets go through the tables of
-// `horizon_legacy_join_data` (identity fallback where its tables end, until
-// the generator's per-release tables land in CI and replace them).
+// Alpha: id-level lanes. Every advertised release 1.8.x (47) through 1.20.1
+// (763) carries its own id tables, composed by name against the 765 era, and
+// packets the pinned era's reader cannot parse drop instead of cutting the
+// connection; translating the era payload layouts themselves is the next
+// milestone (join a pre-flattening server and expect degradation).
 use std::sync::Arc;
 
 use super::{ServerVersion, Session};
@@ -22,64 +23,21 @@ use crate::{
     packets::configuration,
 };
 
-///// Lane registry ///////////////////////////////////////////////////////////
+///// The lane gate ///////////////////////////////////////////////////////////
 
-/// One legacy lane: a server release this mod translates for.
-pub struct Lane {
-    /// The protocol number the server's status reports and its handshake wants.
-    pub protocol: i32,
-}
-
-/// The whole 1.8.x..1.20.1 span (the roadmap). A lane only counts as joinable
-/// when the data crate carries its tables (`covers`), so alpha-1 wires 1.20.1
-/// and the span grows release by release.
-static LANES: &[Lane] = &[
-    Lane { protocol: 763 },
-    Lane { protocol: 762 },
-    Lane { protocol: 761 },
-    Lane { protocol: 760 },
-    Lane { protocol: 759 },
-    Lane { protocol: 758 },
-    Lane { protocol: 757 },
-    Lane { protocol: 756 },
-    Lane { protocol: 755 },
-    Lane { protocol: 754 },
-    Lane { protocol: 753 },
-    Lane { protocol: 751 },
-    Lane { protocol: 578 },
-    Lane { protocol: 575 },
-    Lane { protocol: 498 },
-    Lane { protocol: 480 },
-    Lane { protocol: 477 },
-    Lane { protocol: 473 },
-    Lane { protocol: 441 },
-    Lane { protocol: 404 },
-    Lane { protocol: 401 },
-    Lane { protocol: 389 },
-    Lane { protocol: 340 },
-    Lane { protocol: 335 },
-    Lane { protocol: 316 },
-    Lane { protocol: 315 },
-    Lane { protocol: 210 },
-    Lane { protocol: 110 },
-    Lane { protocol: 109 },
-    Lane { protocol: 108 },
-    Lane { protocol: 107 },
-    Lane { protocol: 47 },
-];
-
-/// A lane this mod's data covers: the only protocols `older_server` accepts.
-/// Upstream's own releases come first: a protocol the adapter already
-/// resolves (1.20.2 (764) through 26.3 (777), incl. 1.21.11 (774)) never
-/// becomes a lane of this mod — its joins are upstream's own session, and
-/// this gate keeps the mod from shadowing them however wide its tables grow.
-pub fn lane(protocol: i32) -> Option<&'static Lane> {
+/// Whether this mod joins `protocol`: the only protocols `older_server`
+/// accepts. Upstream's own releases come first: a protocol the adapter
+/// already resolves (1.20.2 (764) through 26.3 (777), incl. 1.21.11 (774))
+/// never becomes a lane of this mod — its joins are upstream's own session,
+/// and this gate keeps the mod from shadowing them however wide its tables
+/// grow. Below that floor, a protocol counts when the build's generated
+/// tables cover it; the data crate's lane list is the single source of
+/// truth, and this gate holds none of its own to fall out of sync with.
+pub fn covered(protocol: i32) -> bool {
     if ServerVersion::from_protocol(protocol).is_some() {
-        return None;
+        return false;
     }
-    LANES.iter().find(|lane| lane.protocol == protocol).filter(
-        |lane| horizon_legacy_join_data::covers(lane.protocol),
-    )
+    horizon_legacy_join_data::covers(protocol)
 }
 
 ///// Thread-local handoff (older_server and adapt run on the join thread) ////
@@ -162,10 +120,12 @@ pub fn serverbound(lane: i32, session: &Session, body: &[u8]) -> Result<Option<V
             None
         }
         // The real traffic: the inner session renumbers it, then it is rebuilt
-        // with the lane's own packet id.
-        _ => session
-            .serverbound(body)?
-            .map(|body| renumber(lane, entry, body)),
+        // with the lane's own packet id. A body the pinned reader cannot parse
+        // drops instead of cutting the connection.
+        _ => match session.serverbound(body) {
+            Ok(translated) => translated.and_then(|body| renumber(lane, entry, body)),
+            Err(_) => None,
+        },
     };
     requeue_outgoing(lane, session, entry);
     Ok(forwarded)
@@ -182,7 +142,11 @@ pub fn clientbound(
     payload: Vec<u8>,
 ) -> Result<Option<(i32, Vec<u8>)>> {
     let reading = session.reading();
-    let inner_id = up_id(lane, reading, old_id);
+    // The tables name no packet under this lane id for the pinned era: drop
+    // it instead of handing the inner session a different packet's frame.
+    let Some(inner_id) = up_id(lane, reading, old_id) else {
+        return Ok(None);
+    };
     match reading {
         State::Login => {
             let translated = session.clientbound(inner_id, payload)?;
@@ -196,7 +160,10 @@ pub fn clientbound(
         // client side was fabricated. Strays (a second finish somehow) drop.
         State::Configuration => Ok(None),
         _ => {
-            let translated = session.clientbound(inner_id, payload)?;
+            // Era payload layouts the pinned reader cannot parse (pre-
+            // flattening servers, mostly) drop instead of cutting the
+            // connection: a degraded feed outlasts a dead one.
+            let translated = session.clientbound(inner_id, payload).ok().flatten();
             requeue_outgoing(lane, session, reading);
             Ok(translated)
         }
@@ -233,31 +200,31 @@ fn fabricate_configuration(session: &Session) {
 }
 
 /// The inner session's own follow-ups (it queues them in its `outgoing`)
-/// pushed back, renumbered into the lane's numbering for `state`'s wire.
+/// pushed back, renumbered into the lane's numbering for `state`'s wire;
+/// packets the lane never had drop here.
 fn requeue_outgoing(lane: i32, session: &Session, state: State) {
     for body in session.take_outgoing() {
-        let renumbered = renumber(lane, state, body);
-        session.outgoing.lock().unwrap().push(renumbered);
+        if let Some(renumbered) = renumber(lane, state, body) {
+            session.outgoing.lock().unwrap().push(renumbered);
+        }
     }
 }
 
 /// A renumbered outgoing body: the inner session's own packet id looked up in
-/// the lane's send table for `state`, or the body kept when unmapped.
-fn renumber(lane: i32, state: State, body: Vec<u8>) -> Vec<u8> {
+/// the lane's send table for `state`, or None when the lane never had that
+/// packet. The tables are the only source of truth — sending the inner id raw
+/// would mean a different packet to a pre-flattening server.
+fn renumber(lane: i32, state: State, body: Vec<u8>) -> Option<Vec<u8>> {
     let mut r = Reader::new(&body);
     let Ok(id) = r.varint() else {
-        return body;
+        return None; // a body without its own packet id is broken
     };
     let table = horizon_legacy_join_data::table_down(lane, number_of(state));
-    let lane_id = table
-        .get(usize::try_from(id).unwrap_or(999))
-        .copied()
-        .flatten()
-        .map_or(id, |i| i32::from(i));
+    let lane_id = table.get(usize::try_from(id).unwrap_or(999)).copied().flatten()?;
     let mut w = Writer::new();
-    w.varint(lane_id);
+    w.varint(i32::from(lane_id));
     w.bytes(r.rest());
-    w.data
+    Some(w.data)
 }
 
 ///// auxiliaries /////////////////////////////////////////////////////////////
@@ -277,15 +244,15 @@ fn swap_intention_protocol(lane: i32, body: Vec<u8>) -> Vec<u8> {
     w.data
 }
 
-/// A lane packet's id in the inner session's terms. Unmapped ids pass as they
-/// are: alpha-1's identity tables make that right wherever the ids coincide,
-/// and the generated tables keep every mapped id correct.
-fn up_id(lane: i32, state: State, old_id: i32) -> i32 {
+/// A lane packet's id in the inner session's terms, or None when the pinned
+/// era names no such packet: the engine drops the packet instead of sending
+/// a different packet's frame.
+fn up_id(lane: i32, state: State, old_id: i32) -> Option<i32> {
     let table = horizon_legacy_join_data::table_up(lane, number_of(state));
     usize::try_from(old_id)
         .ok()
         .and_then(|i| table.get(i).copied().flatten())
-        .map_or(old_id, |i| i32::from(i))
+        .map(i32::from)
 }
 
 fn number_of(state: State) -> u8 {
