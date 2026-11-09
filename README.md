@@ -22,6 +22,17 @@ session per connection, per-version tables, translations release by release. It
 reuses upstream's machinery where it can (the adapter's own legacy name tables,
 registry splitting, text handling) and adds the lanes upstream never generated.
 
+### Who covers what
+
+| Range | Owner | How |
+|---|---|---|
+| 1.20.2 (764) .. 26.3 (777) — every release between: 1.20.3/4, 1.20.5/6, 1.21/1.21.1, 1.21.2/3, 1.21.4, 1.21.5, 1.21.6, 1.21.7/8, 1.21.9/10, **1.21.11 (774)**, 26.1/26.1.1/26.1.2, 26.2 | Horizon upstream | its own adapter; `ServerVersion::from_protocol` resolves each release |
+| 1.8.x (47) .. 1.20.1 (763) | this mod | the lane registry + tables, release by release |
+
+The split is enforced inside the engine: a protocol upstream already resolves
+never becomes a lane of this mod, so as broader tables arrive they can only
+widen coverage downward — 1.21.11 and friends stay on upstream's own session.
+
 ## Installing
 
 1. Download the newest `alpha.N` release from GitHub Releases.

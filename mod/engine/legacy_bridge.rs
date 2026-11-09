@@ -69,7 +69,14 @@ static LANES: &[Lane] = &[
 ];
 
 /// A lane this mod's data covers: the only protocols `older_server` accepts.
+/// Upstream's own releases come first: a protocol the adapter already
+/// resolves (1.20.2 (764) through 26.3 (777), incl. 1.21.11 (774)) never
+/// becomes a lane of this mod — its joins are upstream's own session, and
+/// this gate keeps the mod from shadowing them however wide its tables grow.
 pub fn lane(protocol: i32) -> Option<&'static Lane> {
+    if ServerVersion::from_protocol(protocol).is_some() {
+        return None;
+    }
     LANES.iter().find(|lane| lane.protocol == protocol).filter(
         |lane| horizon_legacy_join_data::covers(lane.protocol),
     )
