@@ -29,6 +29,14 @@ jobs:
           git -C horizon remote add origin https://github.com/horizon-rust/horizon.git
           git -C horizon fetch --depth 1 origin "$HORIZON_REV"
           git -C horizon checkout "$HORIZON_REV"
+          # The stager refuses symlinks; this pinned rev holds one (CLAUDE.md
+          # -> AGENTS.md). Materialize every tracked symlink as a regular
+          # file with its formerly linked content.
+          for link in $(git -C horizon ls-files -s | awk '$1 == 120000 {print $4}'); do
+            target=$(git -C horizon cat-file blob "HEAD:$link")
+            rm -f "horizon/$link"
+            cp "horizon/$target" "horizon/$link" 2>/dev/null || : > "horizon/$link"
+          done
 
       - name: The horizon-mixins tool
         run: |
