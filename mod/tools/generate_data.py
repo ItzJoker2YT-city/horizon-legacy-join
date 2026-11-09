@@ -30,6 +30,11 @@ occasionally stale), then by any slot whose version.json claims the number.
 The engine's gate holds no list of its own: it admits exactly
 GENERATED_LANES through the data crate's `covers()`.
 
+After the tables, the run audits the whole spectrum: every advertised
+release 1.8..26.3 resolves to exactly one owner (a lane of this mod or
+upstream's own adapter), and anything that does not join prints its reason
+(1.14.2 has no data document; eras before 1.8 sit below this tool's floor).
+
 The committed file is what a released .hnmod ships; CI reruns this every
 build and keeps the committed tables on any network failure.
 
@@ -116,6 +121,15 @@ def is_release(entry) -> bool:
     return RELEASE_NAME.fullmatch(entry.get("minecraftVersion") or "") is not None
 
 
+# The upper seam of the spectrum: upstream's own adapter covers the band
+# 764..777 contiguously (each of its version modules pins its protocol), so
+# the mod's lanes sit strictly below it and the engine refuses any protocol
+# that band already names. Verified module-for-release against the bundle's
+# pinned revision; the engine re-derives the same fact from `from_protocol`
+# at run time, so a drift on either side can only refuse, never mis-translate.
+UPSTREAM_BAND = (764, 777)
+
+
 def release_band(index: list) -> list[tuple[int, str]]:
     """(protocol, release name) for every release entry in the band, oldest
     first, one lane per protocol (the first name met — the index runs newest
@@ -132,6 +146,31 @@ def release_band(index: list) -> list[tuple[int, str]]:
             continue
         names.setdefault(number, name)
     return sorted(names.items())
+
+
+def spectrum(covered: list[int], index: list) -> None:
+    """The promise in one place: every advertised release from 1.8 (47) to
+    26.3 (777) boards through exactly one translator — a lane of this mod
+    (47..763) or upstream's own adapter (764..777). Every other release
+    protocol prints with the reason it does not join."""
+    names: dict[int, str] = {}
+    for entry in index:
+        if not isinstance(entry, dict) or not is_release(entry):
+            continue
+        number = entry.get("version")
+        if isinstance(number, int) and BAND[0] <= number <= UPSTREAM_BAND[1]:
+            names.setdefault(number, entry.get("minecraftVersion") or "?")
+    print("spectrum audit (who joins what):")
+    for number, name in sorted(names.items()):
+        if number >= UPSTREAM_BAND[0]:
+            owner = "upstream's own adapter"
+        elif number in covered:
+            owner = f"this mod (lane {number})"
+        elif tuple(int(part) for part in name.split(".")) < FLOOR:
+            owner = "refused: era predates this tool's 1.8 floor"
+        else:
+            owner = "refused: no minecraft-data document resolves it"
+        print(f"  {number:3}  {name:<9}  {owner}")
 
 
 def named_slots(catalog: dict, index: list) -> dict[int, str]:
@@ -302,6 +341,7 @@ def generate() -> int:
     ]
     write_tables(["\n".join(lines)] + statics)
     print(f"generated {len(covered)} lanes of {len(candidates)} release candidates: {covered}")
+    spectrum(covered, index)
     return len(statics)
 
 

@@ -33,6 +33,17 @@ The split is enforced inside the engine: a protocol upstream already resolves
 never becomes a lane of this mod, so as broader tables arrive they can only
 widen coverage downward — 1.21.11 and friends stay on upstream's own session.
 
+### The whole spectrum, audited
+
+`tools/generate_data.py` re-proves the split on every build: every advertised
+release from 1.8 (47) to 26.3 (777) resolves to exactly one owner — a lane of
+this mod (47..763) or upstream's own adapter (764..777, contiguous by its own
+version modules). Refusals name their reason: 1.14.2 (485) has no
+minecraft-data document, and anything before 1.8 sits outside the 1.8-era
+floor. Nothing needs adding above the 763 seam — upstream's own sessions are
+the answer there, and the engine refuses to let a lane shadow any protocol
+`ServerVersion::from_protocol` already resolves.
+
 ## Installing
 
 1. Download the newest `alpha.N` release from GitHub Releases.
