@@ -1,24 +1,38 @@
-// helpers/older_server.rs — OVERWRITE body of horizon_client::net::older_server.
-// Pings the server, reads its protocol number, and decides who translates:
-// upstream versions (>= 764) return upstream's own ServerVersion and clear any
-// stale thread-local; a protocol the legacy lane registry covers records the
-// number on this thread (run() calls older_server and adapt back to back on the
-// same thread) and returns a marker variant, which the overwritten
-// Connection::adapt reads. Other protocols stay None, as upstream had it.
-fn older_server(address: &str) -> Option<horizon_protocol::adapter::ServerVersion> {
-    let (json, _) = ping(address, std::time::Duration::from_secs(5)).ok()?;
-    let protocol = i32::try_from(json["version"]["protocol"].as_i64()?).ok()?;
+// helpers/older_server.rs — cancellable HEAD hook of `net::older_server`.
+// The hook does the whole pre-join decision and returns from the function:
+// it pings the server, reads its protocol, and — when the legacy lane
+// registry covers it — records the number on this thread and breaks with the
+// marker variant (run() calls older_server and adapt back to back on one
+// thread, so what adapt attaches is decided here). Upstream-supported
+// protocols resolve through the original table; anything else breaks with
+// None, exactly as the original body would have. The original body (and its
+// own ping and env gate) never runs; the gate is replicated here.
+fn older_server(address: &str) -> ::core::ops::ControlFlow<Option<horizon_protocol::adapter::ServerVersion>> {
+    let Some(value) = std::env::var_os("HORIZON_OLDER_SERVERS").filter(|v| v == "1") else {
+        return ::core::ops::ControlFlow::Break(None);
+    };
+    drop(value);
+    let (json, _) = match ping(address, std::time::Duration::from_secs(5)) {
+        Ok(pair) => pair,
+        Err(_) => return ::core::ops::ControlFlow::Break(None),
+    };
+    let Some(protocol) = json["version"]["protocol"].as_i64().and_then(|v| i32::try_from(v).ok()) else {
+        return ::core::ops::ControlFlow::Break(None);
+    };
+    // The pinned version needs nothing.
     if protocol == horizon_protocol::PROTOCOL_VERSION {
-        return None;
+        return ::core::ops::ControlFlow::Break(None);
     }
+    // A covered legacy lane: remember it for adapt, join through the bridge.
     if horizon_protocol::adapter::legacy_join::lane(protocol).is_some() {
         horizon_protocol::adapter::legacy_join::set_thread_protocol(protocol);
-        // A marker value: adapt() is overwritten and reads the thread-local, not
-        // this value; the "1.20.2" shows only in one log line adapt re-logs.
-        return Some(horizon_protocol::adapter::ServerVersion::V1_20_2);
+        // The value only feeds `is_some()` and one log line; adapt reads the
+        // thread-local instead of this argument.
+        return ::core::ops::ControlFlow::Break(Some(horizon_protocol::adapter::ServerVersion::V1_20_2));
     }
-    // Upstream's own protocol numbering (764..): resolve through the overwritten
-    // from_protocol, which passes real variants through untouched.
-    horizon_protocol::adapter::ServerVersion::from_protocol(protocol)
-        .filter(|v| *v != horizon_protocol::adapter::ServerVersion::Current)
+    // Upstream's own releases (764..): through the original table.
+    ::core::ops::ControlFlow::Break(
+        horizon_protocol::adapter::ServerVersion::from_protocol(protocol)
+            .filter(|v| *v != horizon_protocol::adapter::ServerVersion::Current),
+    )
 }

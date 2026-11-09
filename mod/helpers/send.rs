@@ -1,34 +1,30 @@
-// helpers/send.rs — OVERWRITE body of ConnWriter::send.
-// A legacy connection's bridge: serverbound translate first (it may also queue
-// extra packets to send right after), then framing with this writer's threshold.
-fn send(writer: &mut ConnWriter, body: &[u8]) -> Result<()> {
-    if writer.older_client.is_some() {
-        return match writer.for_client(body)? {
-            Some(body) => writer.send_contents(&frame::contents(&body, writer.threshold)?),
-            None => Ok(()),
-        };
-    }
-    if let Some(bridge) = writer
-        .__horizon_mixins_horizon_legacy_join_writer_bridge_mut()
-        .clone()
-    {
-        let translated = bridge.lock().unwrap().serverbound(body)?;
-        if let Some(body) = translated {
-            writer.send_contents(&frame::contents(&body, writer.threshold)?)?;
+// helpers/send.rs — cancellable HEAD hook of `ConnWriter::send`.
+// A legacy connection drives itself through its stamped adapter session (see
+// engine/legacy_bridge.rs): serverbound translation first (the session may
+// also queue follow-ups to send right behind), then the same framing and
+// threshold steps the original body applies. Without a stamped session the
+// original body runs (upstream's own adapter sessions, older clients, plain).
+fn send(writer: &mut ConnWriter, body: &[u8]) -> ::core::ops::ControlFlow<Result<()>> {
+    let stamped = match writer.adapter.as_ref() {
+        // The outlet is a stamped lane: the whole flow is this mod's.
+        Some(session) if crate::adapter::legacy_join::join_lane(session) != 0 => {
+            writer.adapter.clone()
         }
-        for extra in bridge.lock().unwrap().take_outgoing() {
-            writer.send_contents(&frame::contents(&extra, writer.threshold)?)?;
+        Some(_) | None => return ::core::ops::ControlFlow::Continue(()),
+    };
+    let Some(stamped) = stamped else {
+        return ::core::ops::ControlFlow::Continue(());
+    };
+    let lane = crate::adapter::legacy_join::join_lane(&stamped);
+    let outcome = move |writer: &mut ConnWriter| -> Result<()> {
+        let session = &*stamped;
+        if let Some(answer) = crate::adapter::legacy_join::serverbound(lane, session, body)? {
+            writer.send_contents(&frame::contents(&answer, writer.threshold)?)?;
         }
-        return Ok(());
-    }
-    if let Some(a) = writer.adapter.clone() {
-        if let Some(body) = a.serverbound(body)? {
-            writer.send_contents(&frame::contents(&body, writer.threshold)?)?;
+        for answer in crate::adapter::legacy_join::take_outgoing_bodies(session) {
+            writer.send_contents(&frame::contents(&answer, writer.threshold)?)?;
         }
-        for body in a.take_outgoing() {
-            writer.send_contents(&frame::contents(&body, writer.threshold)?)?;
-        }
-        return Ok(());
-    }
-    writer.send_contents(&frame::contents(body, writer.threshold)?)
+        Ok(())
+    };
+    ::core::ops::ControlFlow::Break(outcome(writer))
 }

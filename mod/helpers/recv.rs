@@ -1,25 +1,35 @@
-// helpers/recv.rs — OVERWRITE body of ConnReader::recv.
-// A legacy connection's bridge keeps its own queue: its translations can make
-// several packets of one arriving one (registry data, fabricated configuration
-// traffic). Drain the queue first; then read frames as the original body does
-// and translate each packet through the bridge.
-fn recv(reader: &mut ConnReader) -> Result<(i32, Vec<u8>)> {
-    if let Some(bridge) = reader
-        .__horizon_mixins_horizon_legacy_join_reader_bridge_mut()
-        .clone()
-    {
-        if let Some(packet) = bridge.lock().unwrap().take_incoming() {
+// helpers/recv.rs — cancellable HEAD hook of `ConnReader::recv`.
+// A legacy connection drives itself through its stamped adapter session (see
+// engine/legacy_bridge.rs): its fabricated packets first, then read frames
+// and translate each packet through the engine (a translation may queue
+// fabricated packets behind it). Without a stamped session the original body
+// runs (upstream's own adapter sessions, older clients, plain).
+fn recv(reader: &mut ConnReader) -> ::core::ops::ControlFlow<Result<(i32, Vec<u8>)>> {
+    let stamped = match reader.adapter.as_ref() {
+        // The inlet is a stamped lane: the whole flow is this mod's.
+        Some(session) if crate::adapter::legacy_join::join_lane(session) != 0 => {
+            reader.adapter.clone()
+        }
+        Some(_) | None => return ::core::ops::ControlFlow::Continue(()),
+    };
+    let Some(stamped) = stamped else {
+        return ::core::ops::ControlFlow::Continue(());
+    };
+    let lane = crate::adapter::legacy_join::join_lane(&stamped);
+    let outcome = move |reader: &mut ConnReader| -> Result<(i32, Vec<u8>)> {
+        let session = &*stamped;
+        if let Some(packet) = crate::adapter::legacy_join::take_incoming(session) {
             return Ok(packet);
         }
         loop {
             match reader.next()? {
                 Next::Packet((id, payload)) => {
                     if let Some(packet) =
-                        bridge.lock().unwrap().clientbound(id, payload)?
+                        crate::adapter::legacy_join::clientbound(lane, session, id, payload)?
                     {
                         return Ok(packet);
                     }
-                    if let Some(packet) = bridge.lock().unwrap().take_incoming() {
+                    if let Some(packet) = crate::adapter::legacy_join::take_incoming(session) {
                         return Ok(packet);
                     }
                 }
@@ -27,31 +37,6 @@ fn recv(reader: &mut ConnReader) -> Result<(i32, Vec<u8>)> {
                 Next::Partial(wanted) => reader.fill(wanted)?,
             }
         }
-    }
-    if let Some(packet) = reader.adapter.as_ref().and_then(|a| a.next_incoming()) {
-        return Ok(packet);
-    }
-    loop {
-        match reader.next()? {
-            Next::Packet((id, payload)) if reader.older_client.is_some() => {
-                let client = reader.older_client.as_ref().expect("checked");
-                if let Some(packet) = client.serverbound(id, payload)? {
-                    return Ok(packet);
-                }
-            }
-            Next::Packet(packet) => match &reader.adapter {
-                None => return Ok(packet),
-                Some(a) => {
-                    if let Some(packet) = a.clientbound(packet.0, packet.1)? {
-                        return Ok(packet);
-                    }
-                    if let Some(packet) = a.next_incoming() {
-                        return Ok(packet);
-                    }
-                }
-            },
-            Next::Empty => {}
-            Next::Partial(wanted) => reader.fill(wanted)?,
-        }
-    }
+    };
+    ::core::ops::ControlFlow::Break(outcome(reader))
 }

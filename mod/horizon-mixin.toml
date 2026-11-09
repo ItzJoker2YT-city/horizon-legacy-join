@@ -12,54 +12,52 @@ priority = 10
 horizon_revision = "5f7cadfff0fc073c0e4a68558754578c0d680a29"
 
 # ---------------------------------------------------------------- helpers ---
-# 1. Open the gate (it is off by default while the adapter is incomplete).
-[[injection]]
-id = "open_older_servers"
-target = "horizon_client::net::older_servers_enabled"
-kind = "OVERWRITE"
-helper = "helpers/older_servers_enabled.rs"
+# Every hook is a cancellable HEAD injection: it does the legacy decision
+# itself and breaks with the target result, or continues into the untouched
+# original body (which is where this tool refuses rewrites anyway — upstream
+# bodies carry closures and flow the planner does not verify).
 
-# 2. Resolve what the server speaks by its status ping; remember it for adapt.
+# 1. Resolve what the server speaks by its status ping; record a covered lane
+#    for adapt, break with the marker. Upstream versions break with their own
+#    resolution; ping failures break with None.
 [[injection]]
 id = "resolve_older_server"
 target = "horizon_client::net::older_server"
-kind = "OVERWRITE"
+kind = "HEAD"
+cancellable = true
 helper = "helpers/older_server.rs"
 bindings = [{ name = "address", ty = "&str", value = "address" }]
 
-# 3. Make the server list show legacy servers as joinable (the version name
-#    on the list still comes from the ping's own json).
-[[injection]]
-id = "recognize_legacy_protocols"
-target = "horizon_protocol::adapter::ServerVersion::from_protocol"
-kind = "OVERWRITE"
-helper = "helpers/from_protocol.rs"
-bindings = [{ name = "protocol", ty = "i32", value = "protocol" }]
-
-# 4. Attach the legacy bridge (or upstream's own session for 1.20.2+).
+# 2. Attach the stamped legacy session when older_server recorded a lane;
+#    everything else lets the original body attach upstream's own session.
 [[injection]]
 id = "adapt_connection"
 target = "horizon_protocol::connection::Connection::adapt"
-kind = "OVERWRITE"
+kind = "HEAD"
+cancellable = true
 helper = "helpers/adapt.rs"
 bindings = [
   { name = "conn", ty = "&mut Connection", value = "&mut *self" },
   { name = "version", ty = "crate::adapter::ServerVersion", value = "version" },
 ]
 
-# 5. The reader: drain the bridge's queue first, translate what arrives.
+# 3. The reader: with a stamped session, drain its fabricated packets and
+#    translate what arrives; without one the original body runs.
 [[injection]]
 id = "reader_recv"
 target = "horizon_protocol::connection::ConnReader::recv"
-kind = "OVERWRITE"
+kind = "HEAD"
+cancellable = true
 helper = "helpers/recv.rs"
 bindings = [{ name = "reader", ty = "&mut ConnReader", value = "&mut *self" }]
 
-# 6. The writer: translate before framing, flush extra packets after.
+# 4. The writer: with a stamped session, translate before framing; without
+#    one the original body runs.
 [[injection]]
 id = "writer_send"
 target = "horizon_protocol::connection::ConnWriter::send"
-kind = "OVERWRITE"
+kind = "HEAD"
+cancellable = true
 helper = "helpers/send.rs"
 bindings = [
   { name = "writer", ty = "&mut ConnWriter", value = "&mut *self" },
@@ -86,25 +84,15 @@ path = "legacy_data"
 dependent = "horizon-protocol"
 
 # ---------------------------------------------------------------- state ------
-# The bridge itself, one per connection half (constructed in Connection::over).
+# Which lane protocol a stamped legacy session drives (0 = upstream's own
+# adapter session). Session::new initializes it; the adapt hook stamps it.
 [[state]]
-id = "reader_bridge"
-target = "horizon_protocol::connection::ConnReader"
-ty = "Option<Arc<Mutex<crate::adapter::legacy_join::Bridge>>>"
-initial = "::core::option::Option::None"
+id = "lane_protocol"
+target = "horizon_protocol::adapter::session::Session"
+ty = "std::sync::atomic::AtomicI32"
+initial = "::std::sync::atomic::AtomicI32::new(0)"
 
 [[state.constructor]]
-target = "horizon_protocol::connection::Connection::over"
-selector = "ConnReader"
-require = 1
-
-[[state]]
-id = "writer_bridge"
-target = "horizon_protocol::connection::ConnWriter"
-ty = "Option<Arc<Mutex<crate::adapter::legacy_join::Bridge>>>"
-initial = "::core::option::Option::None"
-
-[[state.constructor]]
-target = "horizon_protocol::connection::Connection::over"
-selector = "ConnWriter"
+target = "horizon_protocol::adapter::session::Session::new"
+selector = "Self"
 require = 1

@@ -1,18 +1,18 @@
-//! The legacy lane engine of horizon-legacy-join: joining servers older than
-//! upstream's own adapter floor (1.20.2). Injected as `legacy_join` into
-//! `adapter.rs`, so it shares the adapter's module tree: one inner `Session`
-//! pinned to [`ServerVersion::V1_20_3`] does the renumbering, payload steps
-//! and state machine upstream built for 1.20.3-era servers, while this bridge
-//! carries a lane wire (its own protocol number and its own packet ids) into
-//! that session and fabricates the phases the era did not speak: whole
-//! configuration state (registries, tags, known packs, the finish) a server
-//! before 1.20.2 never sends, and the login acknowledgment it never answers.
-//!
-//! Alpha-1 wires lane 763 (1.20.1): its login and status packets match the
-//! 765 era, and its play packets go through the tables of
-//! `horizon_legacy_join_data` (identity fallback in this alpha, until the
-//! generator's per-release tables land in CI and replace them).
-use std::collections::VecDeque;
+// The legacy lane engine of horizon-legacy-join: joining servers older than
+// upstream's own adapter floor (1.20.2). Injected as `pub mod legacy_join`
+// into `adapter.rs`, so it shares the adapter's module tree, and the driver
+// itself is just an upstream `Session`: the adapt hook attaches a session
+// pinned to [`ServerVersion::V1_20_3`] into the connection's own `adapter`
+// fields (both halves), stamped through the injected per-Session state
+// `__horizon_mixins_horizon_legacy_join_lane_protocol` (0 = upstream's own
+// session, a lane protocol otherwise). The queues the session already owns
+// (incoming, outgoing) carry everything fabricated on top.
+//
+// Alpha-1 wires lane 763 (1.20.1): its login and status packets match the
+// 765 era, and its play packets go through the tables of
+// `horizon_legacy_join_data` (identity fallback where its tables end, until
+// the generator's per-release tables land in CI and replace them).
+use std::sync::Arc;
 
 use super::{ServerVersion, Session};
 use crate::{
@@ -70,20 +70,12 @@ static LANES: &[Lane] = &[
 
 /// A lane this mod's data covers: the only protocols `older_server` accepts.
 pub fn lane(protocol: i32) -> Option<&'static Lane> {
-    LANES
-        .iter()
-        .find(|lane| lane.protocol == protocol)
-        .filter(|lane| horizon_legacy_join_data::covers(lane.protocol))
+    LANES.iter().find(|lane| lane.protocol == protocol).filter(
+        |lane| horizon_legacy_join_data::covers(lane.protocol),
+    )
 }
 
-/// The variant a covered lane resolves to through the overwritten
-/// `from_protocol`: only its `is_some()` matters (the server list), the join
-/// itself reads the thread-local below.
-pub fn marker(protocol: i32) -> Option<ServerVersion> {
-    lane(protocol).map(|_| ServerVersion::V1_20_2)
-}
-
-///// Thread-local handoff (older_server and adapt are both overwritten) //////
+///// Thread-local handoff (older_server and adapt run on the join thread) ////
 
 std::thread_local! {
     static THREAD_PROTOCOL: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
@@ -100,193 +92,189 @@ pub fn take_thread_protocol() -> Option<i32> {
     THREAD_PROTOCOL.with(|cell| cell.take())
 }
 
-///// The bridge //////////////////////////////////////////////////////////////
+///// The stamped session /////////////////////////////////////////////////////
 
-/// Per-connection translator, shared by both halves of the connection (the
-/// injected per-instance state holds it as `Arc<Mutex<Bridge>>`), with one
-/// inner upstream session as the state authority for everything it does.
-pub struct Bridge {
-    lane: &'static Lane,
-    /// The upstream session this wire is made to look like 1.20.3 to.
-    inner: Session,
-    /// Translations waiting for Horizon to read, in pinned numbering.
-    incoming: VecDeque<(i32, Vec<u8>)>,
-    /// Bodies Horizon sends next (follow-ups the inner session's translation
-    /// produced), renumbered into the lane's own ids.
-    outgoing: Vec<Vec<u8>>,
+/// The lane protocol a session drives (0 = upstream's own adapter session,
+/// which this mod never intercepts).
+pub fn join_lane(session: &Session) -> i32 {
+    session
+        .__horizon_mixins_horizon_legacy_join_lane_protocol()
+        .load(::std::sync::atomic::Ordering::Acquire)
 }
 
-impl Bridge {
-    pub fn new(protocol: i32) -> Self {
-        Self {
-            lane: lane(protocol).unwrap_or(&LANES[0]),
-            inner: Session::new(ServerVersion::V1_20_3),
-            incoming: VecDeque::new(),
-            outgoing: Vec::new(),
+/// Stamp a session as the driver of `protocol`'s lane.
+pub fn set_lane(session: &mut Session, protocol: i32) {
+    session
+        .__horizon_mixins_horizon_legacy_join_lane_protocol()
+        .store(protocol, ::std::sync::atomic::Ordering::Release);
+}
+
+/// A stamped legacy session (the adapt hook's shorthand): the inner upstream
+/// session of the pinned era, and the lane it carries in injected state.
+pub fn stamped_session(lane: i32) -> Result<Arc<Session>> {
+    let mut session = Session::new(ServerVersion::V1_20_3);
+    set_lane(&mut session, lane);
+    Ok(Arc::new(session))
+}
+
+/// The next fabricated packet Horizon reads, ahead of anything from the wire.
+pub fn take_incoming(session: &Session) -> Option<(i32, Vec<u8>)> {
+    session.incoming.lock().unwrap().pop_front()
+}
+
+/// The inner session's own follow-up bodies, already renumbered into the
+/// lane's own numbering, for Horizon to send right behind what it sends.
+pub fn take_outgoing_bodies(session: &Session) -> Vec<Vec<u8>> {
+    session.take_outgoing()
+}
+
+///// The translation steps (the helpers call these) ///////////////////////////
+
+/// A packet Horizon sends, as its full pinned-numbered body: the lane wire's
+/// answer re-identified into the lane's own ids, or `None` when this lane
+/// keeps the packet to itself (the fake phases) or has no such packet.
+pub fn serverbound(lane: i32, session: &Session, body: &[u8]) -> Result<Option<Vec<u8>>> {
+    let entry = session.writing();
+    let packet = Reader::new(body).varint().ok().unwrap_or(-1);
+    let forwarded = match entry {
+        // The handshake passes as it is: the inner session reads its own
+        // protocol field and answers with its own protocol number, which is
+        // rebuilt with the lane's.
+        State::Handshake => session
+            .serverbound(body)
+            .map(|body| body.map(|body| swap_intention_protocol(lane, body)))?,
+        // A server before 1.20.2 answers neither the login acknowledgment nor
+        // any configuration packet. The inner session keeps its own state
+        // machine through them; the wire stays quiet.
+        State::Login if packet == ids::login::serverbound::LOGIN_ACKNOWLEDGED => {
+            let _ = session.serverbound(body)?;
+            None
         }
-    }
-
-    /// The next translation Horizon reads.
-    pub fn take_incoming(&mut self) -> Option<(i32, Vec<u8>)> {
-        self.incoming.pop_front()
-    }
-
-    /// Bodies Horizon sends right behind the packet it just sent.
-    pub fn take_outgoing(&mut self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.outgoing)
-    }
-
-    /// The inner session's own follow-ups (it queues split or extra packets
-    /// there), renumbered into the lane's numbers for this state's wire.
-    fn pull_inner_outgoing(&mut self, state: State) {
-        for body in self.inner.take_outgoing() {
-            self.outgoing.push(self.swap_outgoing_id(state, body));
+        State::Configuration => {
+            let _ = session.serverbound(body)?;
+            None
         }
-    }
+        // The real traffic: the inner session renumbers it, then it is rebuilt
+        // with the lane's own packet id.
+        _ => session
+            .serverbound(body)?
+            .map(|body| renumber(lane, entry, body)),
+    };
+    requeue_outgoing(lane, session, entry);
+    Ok(forwarded)
+}
 
-    /// A packet Horizon sends, as its full pinned-numbered body. The lane
-    /// wire's answer (re-identified into the lane's own ids), or `None` when
-    /// this lane keeps the packet to itself (the fake phases) or has no
-    /// such packet at all.
-    pub fn serverbound(&mut self, body: &[u8]) -> Result<Option<Vec<u8>>> {
-        let entry = self.inner.writing();
-        let packet = Reader::new(body).varint().ok().unwrap_or(-1);
-        let forwarded = match entry {
-            // The handshake passes as it is: the inner session reads its own
-            // protocol field, states its next states by the intent and answers
-            // with its own protocol number, which is swapped to the lane's.
-            State::Handshake => self
-                .inner
-                .serverbound(body)?
-                .map(|body| self.swap_intention_protocol(body)),
-            // A server before 1.20.2 answered neither the login acknowledgment
-            // nor any configuration packet. The inner session keeps its own
-            // state machine through them; the wire stays quiet.
-            State::Login if packet == ids::login::serverbound::LOGIN_ACKNOWLEDGED => {
-                let _ = self.inner.serverbound(body)?;
-                None
+/// A packet the lane server sent, in its own ids and its own layouts. One
+/// non-passthrough stop is the login's finish: the moment the fake
+/// configuration phase is queued (it is read before any further frame, so it
+/// lands entirely ahead of the play feed the server starts right after).
+pub fn clientbound(
+    lane: i32,
+    session: &Session,
+    old_id: i32,
+    payload: Vec<u8>,
+) -> Result<Option<(i32, Vec<u8>)>> {
+    let reading = session.reading();
+    let inner_id = up_id(lane, reading, old_id);
+    match reading {
+        State::Login => {
+            let translated = session.clientbound(inner_id, payload)?;
+            requeue_outgoing(lane, session, reading);
+            if session.reading() == State::Configuration {
+                fabricate_configuration(session);
             }
-            State::Configuration => {
-                let _ = self.inner.serverbound(body)?;
-                None
-            }
-            // The real traffic: the inner session renumbers it, then it is
-            // rebuilt with the lane's own packet id.
-            _ => self
-                .inner
-                .serverbound(body)?
-                .map(|body| self.swap_outgoing_id(entry, body)),
-        };
-        self.pull_inner_outgoing(entry);
-        Ok(forwarded)
-    }
-
-    /// A packet the lane server sent, in its own ids and its own layouts.
-    /// Horizon's pinned-numbered packet, or `None` when the inner session
-    /// knows no such packet. The one non-passthrough stop is the login's
-    /// finish: the moment the fake configuration phase is queued (it is read
-    /// before any further frame, so it lands entirely ahead of the play feed
-    /// the server starts right after the login).
-    pub fn clientbound(
-        &mut self,
-        old_id: i32,
-        payload: Vec<u8>,
-    ) -> Result<Option<(i32, Vec<u8>)>> {
-        let reading = self.inner.reading();
-        let inner_id = up_id(self.lane.protocol, reading, old_id);
-        match reading {
-            State::Login => {
-                let translated = self.inner.clientbound(inner_id, payload)?;
-                self.pull_inner_outgoing(reading);
-                // The login went through: queue the phase the era lacks, and
-                // steer the inner session into its play state behind it.
-                if self.inner.reading() == State::Configuration {
-                    self.fabricate_configuration();
-                }
-                Ok(translated)
-            }
-            // The connection hears nothing on the wire during this phase: its
-            // client side was fabricated. Strays (a second finish somehow) drop.
-            State::Configuration => Ok(None),
-            _ => {
-                let translated = self.inner.clientbound(inner_id, payload)?;
-                self.pull_inner_outgoing(reading);
-                Ok(translated)
-            }
+            Ok(translated)
+        }
+        // The connection hears nothing on the wire during this phase: its
+        // client side was fabricated. Strays (a second finish somehow) drop.
+        State::Configuration => Ok(None),
+        _ => {
+            let translated = session.clientbound(inner_id, payload)?;
+            requeue_outgoing(lane, session, reading);
+            Ok(translated)
         }
     }
+}
 
-    /// The fake configuration phase: every static registry of the era as its
-    /// own RegistryData (entries named, no worldgen data), no tags, no known
-    /// packs, then the finish — which flips the inner session to its play
-    /// state so the real play feed right behind the queue decodes.
-    fn fabricate_configuration(&mut self) {
-        let cb = ids::configuration::clientbound;
-        let mut tables: Vec<(String, Vec<String>)> =
-            super::legacy::registries(ServerVersion::V1_20_2)
-                .into_iter()
-                .map(|(registry, ids)| (registry, ids.names))
-                .collect();
-        tables.sort_by(|a, b| a.0.cmp(&b.0));
-        for (registry, names) in tables {
-            self.incoming
-                .push_back((cb::REGISTRY_DATA, registry_body(&registry, &names)));
-        }
-        let mut w = Writer::new();
-        configuration::UpdateTags::write(&configuration::UpdateTags { registries: Vec::new() }, &mut w);
-        self.incoming.push_back((cb::UPDATE_TAGS, w.data));
-        let mut w = Writer::new();
-        configuration::SelectKnownPacks::write(
-            &configuration::SelectKnownPacks { packs: Vec::new() },
-            &mut w,
-        );
-        self.incoming.push_back((cb::SELECT_KNOWN_PACKS, w.data));
-        self.incoming.push_back((cb::FINISH_CONFIGURATION, Vec::new()));
-        let _ = self.inner.clientbound(cb::FINISH_CONFIGURATION, Vec::new());
+/// The fake configuration phase: every static registry of the era as its own
+/// RegistryData (entries named, no worldgen data), no tags, no known packs,
+/// then the finish - which flips the inner session to its play state so the
+/// real play feed right behind the queue decodes.
+fn fabricate_configuration(session: &Session) {
+    use crate::ids::configuration::clientbound as cb;
+    let mut tables: Vec<(String, Vec<String>)> = super::legacy::registries(ServerVersion::V1_20_2)
+        .into_iter()
+        .map(|(registry, ids)| (registry, ids.names))
+        .collect();
+    tables.sort_by(|a, b| a.0.cmp(&b.0));
+    for (registry, names) in &tables {
+        session.incoming.lock().unwrap().push_back((
+            cb::REGISTRY_DATA,
+            registry_body(registry, names),
+        ));
     }
+    let mut w = Writer::new();
+    configuration::UpdateTags::write(&configuration::UpdateTags { registries: Vec::new() }, &mut w);
+    session.incoming.lock().unwrap().push_back((cb::UPDATE_TAGS, w.data));
+    let mut w = Writer::new();
+    configuration::SelectKnownPacks::write(
+        &configuration::SelectKnownPacks { packs: Vec::new() },
+        &mut w,
+    );
+    session.incoming.lock().unwrap().push_back((cb::SELECT_KNOWN_PACKS, w.data));
+    let _ = session.clientbound(cb::FINISH_CONFIGURATION, Vec::new());
+}
 
-    /// The inner session's handshake answer comes with its own protocol
-    /// number in place; the lane server wants its own. [id][protocol][rest].
-    fn swap_intention_protocol(&self, body: Vec<u8>) -> Vec<u8> {
-        let mut r = Reader::new(&body);
-        if r.varint().is_err() || r.varint().is_err() {
-            return body;
-        }
-        let rest = r.rest();
-        let mut w = Writer::new();
-        w.varint(ids::handshake::serverbound::INTENTION);
-        w.varint(self.lane.protocol);
-        w.bytes(rest);
-        w.data
+/// The inner session's own follow-ups (it queues them in its `outgoing`)
+/// pushed back, renumbered into the lane's numbering for `state`'s wire.
+fn requeue_outgoing(lane: i32, session: &Session, state: State) {
+    for body in session.take_outgoing() {
+        let renumbered = renumber(lane, state, body);
+        session.outgoing.lock().unwrap().push(renumbered);
     }
+}
 
-    /// A serverbound answer (the inner session's own ids) rebuilt with the
-    /// lane's packet id.
-    fn swap_outgoing_id(&self, state: State, body: Vec<u8>) -> Vec<u8> {
-        let mut r = Reader::new(&body);
-        let Ok(id) = r.varint() else {
-            return body;
-        };
-        let lane = horizon_legacy_join_data::table_down(self.lane.protocol, number_of(state));
-        let lane_id = lane
-            .get(usize::try_from(id).unwrap_or(999))
-            .copied()
-            .flatten()
-            .map_or(id, |i| i32::from(i));
-        let mut w = Writer::new();
-        w.varint(lane_id);
-        w.bytes(r.rest());
-        w.data
-    }
+/// A renumbered outgoing body: the inner session's own packet id looked up in
+/// the lane's send table for `state`, or the body kept when unmapped.
+fn renumber(lane: i32, state: State, body: Vec<u8>) -> Vec<u8> {
+    let mut r = Reader::new(&body);
+    let Ok(id) = r.varint() else {
+        return body;
+    };
+    let table = horizon_legacy_join_data::table_down(lane, number_of(state));
+    let lane_id = table
+        .get(usize::try_from(id).unwrap_or(999))
+        .copied()
+        .flatten()
+        .map_or(id, |i| i32::from(i));
+    let mut w = Writer::new();
+    w.varint(lane_id);
+    w.bytes(r.rest());
+    w.data
 }
 
 ///// auxiliaries /////////////////////////////////////////////////////////////
 
+/// The inner session's handshake answer comes with its own protocol number
+/// in place; the lane server wants its own. [id][protocol][rest].
+fn swap_intention_protocol(lane: i32, body: Vec<u8>) -> Vec<u8> {
+    let mut r = Reader::new(&body);
+    if r.varint().is_err() || r.varint().is_err() {
+        return body;
+    }
+    let rest = r.rest();
+    let mut w = Writer::new();
+    w.varint(ids::handshake::serverbound::INTENTION);
+    w.varint(lane);
+    w.bytes(rest);
+    w.data
+}
+
 /// A lane packet's id in the inner session's terms. Unmapped ids pass as they
 /// are: alpha-1's identity tables make that right wherever the ids coincide,
 /// and the generated tables keep every mapped id correct.
-fn up_id(protocol: i32, state: State, old_id: i32) -> i32 {
-    let table = horizon_legacy_join_data::table_up(protocol, number_of(state));
+fn up_id(lane: i32, state: State, old_id: i32) -> i32 {
+    let table = horizon_legacy_join_data::table_up(lane, number_of(state));
     usize::try_from(old_id)
         .ok()
         .and_then(|i| table.get(i).copied().flatten())
