@@ -1,8 +1,10 @@
-# Repo scaffolding for the native mod bundle: staged output and CI targets.
+# Repo scaffolding for the native mod bundle: staged output and local clones.
 /target/
 /target/staged/
 horizon/
 mixins/
+mixins-local/
+mod/README.md
 *.hnmod
 tool-output/
 __pycache__/

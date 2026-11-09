@@ -51,14 +51,18 @@ active, and the mod's own lanes activate alongside it.
 ## Layout
 
 ```
-horizon-mixin.toml        the bundle manifest (injections, support module, state)
-helpers/                  one .rs file per hook point (compiled into the game)
-engine/legacy_bridge.rs   the injected support module (the whole lane engine)
-tools/generate_data.py    composes the lane tables from PrismarineJS/minecraft-data's
-                          per-version protocol documents (name-matched lane -> 765-era ids)
-legacy_data/              the generated tables, a workspace crate of the engine's own
-.github/workflows/        CI: apply the mixins, cargo-check, package, release
+mod/horizon-mixin.toml     the bundle manifest (injections, support module, state)
+mod/helpers/               one .rs file per hook point (compiled into the game)
+mod/engine/legacy_bridge.rs the injected support module (the whole lane engine)
+mod/tools/generate_data.py composes the lane tables from PrismarineJS/minecraft-data's
+                           per-version protocol documents (name-matched lane -> 765-era ids)
+mod/legacy_data/           the generated tables, a workspace crate of the engine's own
+.github/workflows/         CI: apply the mixins, cargo-check, package, release
 ```
+
+The bundle lives in `mod/` (a `--mods` root holds one directory per mod,
+each with its own `horizon-mixin.toml`; the tool refuses a manifest
+sitting in the root itself).
 
 ## Building yourself
 
